@@ -437,6 +437,21 @@ Maximum number of parallel workers for page export. Set to `1` for serial/debug 
 
 > [!Note]
 > Auth credentials use URL-keyed nested dicts (e.g. `auth.confluence["https://company.atlassian.net"]`) and cannot be mapped to flat ENV var names. Use `cme config edit auth.confluence` or `cme config set` for auth configuration.
+>
+> **For CI / scripting**: use the `CME_CONFLUENCE_BEARER_TOKEN` environment variable (see below) to authenticate with a single bearer token without storing credentials in the config file.
+
+##### CME_CONFLUENCE_BEARER_TOKEN
+
+Set this environment variable to authenticate with Confluence using a direct bearer token (access token). When present and non-empty it takes precedence over any credentials stored in the config file and no stored auth config is required.
+
+```sh
+export CME_CONFLUENCE_BEARER_TOKEN=<your-token>
+cme pages <page-url>
+```
+
+This is the recommended approach for CI/CD pipelines and non-interactive environments where you want to pass credentials via environment variables rather than a config file.
+
+**Precedence:** `CME_CONFLUENCE_BEARER_TOKEN` (bearer token) → stored `auth.confluence` config (username+api_token or PAT).
 
 ##### auth.confluence.url
 

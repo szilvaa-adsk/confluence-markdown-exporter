@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import urllib.parse
 from threading import Lock
@@ -10,6 +11,7 @@ from atlassian import Confluence as ConfluenceApiSdk
 from atlassian import Jira as JiraApiSdk
 from pydantic import AfterValidator
 from pydantic import BaseModel
+from pydantic import SecretStr
 
 from confluence_markdown_exporter.utils.app_data_store import ApiDetails
 from confluence_markdown_exporter.utils.app_data_store import AtlassianSdkConnectionConfig
@@ -29,6 +31,7 @@ _thread_local = local()
 
 _CLOUD_DOMAIN = ".atlassian.net"
 _GATEWAY_PREFIX = "https://api.atlassian.com/ex"
+_BEARER_TOKEN_ENV_VAR = "CME_CONFLUENCE_BEARER_TOKEN"  # noqa: S105
 
 
 def parse_gateway_url(url: str) -> tuple[str, str] | None:
@@ -225,6 +228,9 @@ def get_confluence_instance(url: str) -> ConfluenceApiSdk:
     Creates a new client if one doesn't exist for that URL yet and caches it.
     Prompts for auth config on connection failure.
 
+    When the environment variable ``CME_CONFLUENCE_BEARER_TOKEN`` is set, bearer token
+    authentication takes precedence over any stored credentials.
+
     When the configured auth for *url* includes a Cloud ID, API calls are routed through
     the Atlassian API gateway (``https://api.atlassian.com/ex/confluence/{cloud_id}``),
     which enables the use of scoped API tokens.  For standard Atlassian Cloud instances
@@ -236,24 +242,32 @@ def get_confluence_instance(url: str) -> ConfluenceApiSdk:
             logger.debug("Confluence client cache hit for %s", url)
             return _confluence_clients[url]
 
+    bearer_token = os.environ.get(_BEARER_TOKEN_ENV_VAR)
     settings = get_settings()
 
-    auth = settings.auth.get_instance(url)
-    if auth is None:
-        raise AuthNotConfiguredError(url, "Confluence")
+    if bearer_token:
+        # Bearer token takes precedence; no stored auth config required.
+        logger.debug("Using bearer token auth for Confluence at %s", url)
+        auth = ApiDetails(pat=SecretStr(bearer_token))
+        sdk_url = url
+    else:
+        auth = settings.auth.get_instance(url)
+        if auth is None:
+            raise AuthNotConfiguredError(url, "Confluence")
 
-    logger.debug("Creating new Confluence client for %s", url)
+        logger.debug("Creating new Confluence client for %s", url)
 
-    # Auto-fetch and store the Cloud ID for standard Atlassian Cloud instances
-    if not auth.cloud_id and _is_standard_atlassian_cloud_url(url):
-        cloud_id = _try_fetch_cloud_id(url)
-        if cloud_id:
-            logger.info("Auto-fetched Atlassian Cloud ID for %s — storing in config", url)
-            set_setting_with_keys(["auth", "confluence", url, "cloud_id"], cloud_id)
-            settings = get_settings()
+        # Auto-fetch and store the Cloud ID for standard Atlassian Cloud instances
+        if not auth.cloud_id and _is_standard_atlassian_cloud_url(url):
+            cloud_id = _try_fetch_cloud_id(url)
+            if cloud_id:
+                logger.info("Auto-fetched Atlassian Cloud ID for %s — storing in config", url)
+                set_setting_with_keys(["auth", "confluence", url, "cloud_id"], cloud_id)
+                settings = get_settings()
 
-    auth = settings.auth.get_instance(url) or ApiDetails()
-    sdk_url = _get_confluence_sdk_url(url, auth)
+        auth = settings.auth.get_instance(url) or ApiDetails()
+        sdk_url = _get_confluence_sdk_url(url, auth)
+
     try:
         client = ApiClientFactory(settings.connection_config).create_confluence(sdk_url, auth)
         logger.info("Connected to Confluence at %s", sdk_url)

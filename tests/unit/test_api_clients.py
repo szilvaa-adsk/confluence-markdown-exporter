@@ -357,3 +357,130 @@ class TestAuthConfigContextPath:
     def test_get_instance_no_false_match(self, stored_key: str, lookup_url: str) -> None:
         config = self._make_config(stored_key)
         assert config.get_instance(lookup_url) is None
+
+
+class TestBearerTokenAuth:
+    """Test bearer token authentication via CME_CONFLUENCE_BEARER_TOKEN env var."""
+
+    @patch("confluence_markdown_exporter.api_clients._confluence_clients", {})
+    @patch("confluence_markdown_exporter.api_clients.get_settings")
+    @patch("confluence_markdown_exporter.api_clients.ApiClientFactory")
+    def test_bearer_token_used_when_env_var_set(
+        self,
+        mock_factory_class: MagicMock,
+        mock_get_settings: MagicMock,
+        sample_config_model: ConfigModel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When CME_CONFLUENCE_BEARER_TOKEN is set, it is used for auth."""
+        monkeypatch.setenv("CME_CONFLUENCE_BEARER_TOKEN", "my-secret-bearer-token")
+        mock_get_settings.return_value = sample_config_model
+        mock_factory = MagicMock()
+        mock_confluence = MagicMock()
+        mock_factory.create_confluence.return_value = mock_confluence
+        mock_factory_class.return_value = mock_factory
+
+        result = get_confluence_instance(SAMPLE_CONFLUENCE_URL)
+
+        assert result == mock_confluence
+        _call_kwargs = mock_factory.create_confluence.call_args
+        _used_auth: ApiDetails = _call_kwargs[0][1]
+        assert _used_auth.pat.get_secret_value() == "my-secret-bearer-token"
+        assert not _used_auth.username.get_secret_value()
+        assert not _used_auth.api_token.get_secret_value()
+
+    @patch("confluence_markdown_exporter.api_clients._confluence_clients", {})
+    @patch("confluence_markdown_exporter.api_clients.get_settings")
+    @patch("confluence_markdown_exporter.api_clients.ApiClientFactory")
+    def test_bearer_token_overrides_stored_config(
+        self,
+        mock_factory_class: MagicMock,
+        mock_get_settings: MagicMock,
+        sample_config_model: ConfigModel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bearer token takes precedence over any stored credentials."""
+        monkeypatch.setenv("CME_CONFLUENCE_BEARER_TOKEN", "override-token")
+        mock_get_settings.return_value = sample_config_model
+        mock_factory = MagicMock()
+        mock_confluence = MagicMock()
+        mock_factory.create_confluence.return_value = mock_confluence
+        mock_factory_class.return_value = mock_factory
+
+        result = get_confluence_instance(SAMPLE_CONFLUENCE_URL)
+
+        assert result == mock_confluence
+        _used_auth: ApiDetails = mock_factory.create_confluence.call_args[0][1]
+        assert _used_auth.pat.get_secret_value() == "override-token"
+
+    @patch("confluence_markdown_exporter.api_clients._confluence_clients", {})
+    @patch("confluence_markdown_exporter.api_clients.get_settings")
+    @patch("confluence_markdown_exporter.api_clients.ApiClientFactory")
+    def test_bearer_token_works_without_stored_auth(
+        self,
+        mock_factory_class: MagicMock,
+        mock_get_settings: MagicMock,
+        sample_config_model: ConfigModel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bearer token works even when no auth config is stored for the URL."""
+        monkeypatch.setenv("CME_CONFLUENCE_BEARER_TOKEN", "token-no-config")
+        # Use a config with no stored auth for the URL
+        empty_auth_config = sample_config_model.model_copy(
+            update={"auth": sample_config_model.auth.model_copy(update={"confluence": {}})}
+        )
+        mock_get_settings.return_value = empty_auth_config
+        mock_factory = MagicMock()
+        mock_confluence = MagicMock()
+        mock_factory.create_confluence.return_value = mock_confluence
+        mock_factory_class.return_value = mock_factory
+
+        # Should not raise AuthNotConfiguredError
+        result = get_confluence_instance(SAMPLE_CONFLUENCE_URL)
+
+        assert result == mock_confluence
+        _used_auth: ApiDetails = mock_factory.create_confluence.call_args[0][1]
+        assert _used_auth.pat.get_secret_value() == "token-no-config"
+
+    @patch("confluence_markdown_exporter.api_clients._confluence_clients", {})
+    @patch("confluence_markdown_exporter.api_clients.get_settings")
+    def test_no_bearer_token_raises_when_no_auth(
+        self,
+        mock_get_settings: MagicMock,
+        sample_config_model: ConfigModel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without bearer token, missing stored auth raises AuthNotConfiguredError."""
+        monkeypatch.delenv("CME_CONFLUENCE_BEARER_TOKEN", raising=False)
+        empty_auth_config = sample_config_model.model_copy(
+            update={"auth": sample_config_model.auth.model_copy(update={"confluence": {}})}
+        )
+        mock_get_settings.return_value = empty_auth_config
+
+        with pytest.raises(AuthNotConfiguredError):
+            get_confluence_instance(SAMPLE_CONFLUENCE_URL)
+
+    @patch("confluence_markdown_exporter.api_clients._confluence_clients", {})
+    @patch("confluence_markdown_exporter.api_clients.get_settings")
+    @patch("confluence_markdown_exporter.api_clients.ApiClientFactory")
+    def test_empty_bearer_token_falls_back_to_stored_auth(
+        self,
+        mock_factory_class: MagicMock,
+        mock_get_settings: MagicMock,
+        sample_config_model: ConfigModel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty CME_CONFLUENCE_BEARER_TOKEN is treated as unset; stored auth is used."""
+        monkeypatch.setenv("CME_CONFLUENCE_BEARER_TOKEN", "")
+        mock_get_settings.return_value = sample_config_model
+        mock_factory = MagicMock()
+        mock_confluence = MagicMock()
+        mock_factory.create_confluence.return_value = mock_confluence
+        mock_factory_class.return_value = mock_factory
+
+        result = get_confluence_instance(SAMPLE_CONFLUENCE_URL)
+
+        assert result == mock_confluence
+        # Stored auth (with api_token) should be used, not bearer token
+        _used_auth: ApiDetails = mock_factory.create_confluence.call_args[0][1]
+        assert _used_auth.api_token.get_secret_value() == "test-token"
